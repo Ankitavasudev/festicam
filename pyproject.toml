@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "festicam"
+version = "0.1.0"
+description = "Open your camera and the festival arrives - Holi colors you spray, Diwali fireworks you launch, snow that falls with Jingle Bells. Six festivals, webcam hands, zero downloads."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Ankita Salaria" }]
+keywords = ["webcam", "mediapipe", "festivals", "holi", "diwali", "ar", "audio", "hand-tracking"]
+
+[project.optional-dependencies]
+run = ["mediapipe>=0.10", "opencv-python", "sounddevice"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+festicam = ["models/*.task"]

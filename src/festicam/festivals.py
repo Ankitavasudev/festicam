@@ -1,14 +1,13 @@
-"""Festival data: palettes, banners, music, and per-festival behavior.
+"""Festival data: palette, banner, ambience, and per-festival behaviors.
 
 Adding a new festival = adding one FESTIVALS entry. The engine in app.py
-is generic; only data lives here.
+is generic; only data lives here. No sound in FestiCam - the vibe is
+pure picture.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from .synth import JINGLE_BELLS, SPARKLE_BELLS, KICK, SNARE, HIHAT
+from dataclasses import dataclass, field
 
 # bgr colors
 PINK = (180, 60, 255)
@@ -18,87 +17,94 @@ GREEN = (80, 220, 80)
 CYAN = (255, 190, 40)
 GOLD = (30, 200, 255)
 VIOLET = (220, 60, 220)
-WHITEISH = (240, 240, 240)
+WHITEISH = (242, 242, 242)
+WATER = (255, 198, 88)          # soft pani blue
+GARLAND = (60, 170, 240)        # marigold orange
 
 
 @dataclass
 class Festival:
-    key: str                       # hotkey 1..6
-    title: str                     # big banner line
-    subtitle: str
-    palette: list[int]             # bgr colors used by particles/garlands
-    groove: tuple = ()             # drum step pattern when music on
-    melody: tuple = ()             # bell note sequence, overrides groove
-    spray: bool = False            # pointing finger sprays palette from the tip
-    fireworks: bool = False        # pinch launches a firework at the finger
-    wrist_ring: bool = False       # golden ring ties itself around the wrist
-    snow: bool = False             # snowfall ambience
-    stars: bool = False            # twinkling ambient sparkles
-    diyas: bool = False            # row of oil lamps at the bottom
-    stains: bool = False           # colors accumulate on the wall (Holi paint)
-    confetti: bool = False         # falling confetti ambience
-    crescent: bool = False         # big crescent moon
+    key: str                      # hotkey 1..6
+    title: str
+    hint: str                     # one easy line: what to do
+    palette: list[int]            # bgr colors for cheek paint + bursts
+    garland: bool = False         # marigold art across the top
+    rangoli: bool = False         # mandala art in the corners
+    moon: bool = False            # glowing crescent
+    stars: bool = False           # twinkling sparkles
+    snow: bool = False            # snowfall ambience
+    confetti: bool = False        # falling confetti ambience
+    rain: bool = False            # hand raised -> paani falls
+    cheek_paint: bool = False     # head tilt -> gulaal on the cheeks
+    burst_color: tuple = field(default_factory=lambda: PINK)
 
 
 HOLI = Festival(
     key="1",
     title="HAPPY HOLI!",
-    subtitle="point to spray gulaal  |  pinch for a color bomb",
+    hint="tilt your head to paint your cheeks   |   raise a hand for paani   |   pinch for a burst",
     palette=[PINK, MAGENTA, SUNSET, GREEN, CYAN, VIOLET],
-    groove=(KICK, HIHAT, SNARE, HIHAT, KICK, KICK, SNARE, HIHAT),
-    spray=True,
-    stains=True,
-    confetti=True,
+    garland=True,
+    rangoli=True,
+    rain=True,
+    cheek_paint=True,
+    burst_color=PINK,
 )
 
 DIWALI = Festival(
     key="2",
     title="HAPPY DIWALI!",
-    subtitle="pinch to launch fireworks  |  point for golden phuljhadi",
+    hint="tilt to light up your cheeks with gold   |   pinch to launch fireworks",
     palette=[GOLD, SUNSET, PINK, CYAN],
-    spray=True,
-    fireworks=True,
-    diyas=True,
+    garland=True,
+    rangoli=True,
     stars=True,
+    cheek_paint=True,
+    burst_color=GOLD,
 )
 
 RAKHI = Festival(
     key="3",
     title="HAPPY RAKSHA BANDHAN!",
-    subtitle="show your wrist - the rakhi ties itself",
+    hint="raise your hand to catch the blessings   |   pinch for a sparkle",
     palette=[GOLD, PINK, SUNSET],
-    wrist_ring=True,
+    garland=True,
     stars=True,
+    burst_color=GOLD,
 )
 
 EID = Festival(
     key="4",
     title="EID MUBARAK!",
-    subtitle="look up - the crescent is yours tonight",
+    hint="look up - the crescent is yours tonight   |   pinch for sparkles",
     palette=[GOLD, GREEN, CYAN],
-    melody=SPARKLE_BELLS,
-    wrist_ring=True,
+    garland=True,
+    moon=True,
     stars=True,
-    crescent=True,
+    burst_color=GREEN,
 )
 
 CHRISTMAS = Festival(
     key="5",
     title="MERRY CHRISTMAS!",
-    subtitle="wave for snow  |  hum along - Jingle Bells is live",
+    hint="let it snow   |   tilt for a rosy cheeks glow   |   pinch for a twinkle",
     palette=[GOLD, CYAN, SUNSET, WHITEISH],
-    melody=JINGLE_BELLS,
-    spray=True,
+    garland=True,
     snow=True,
+    cheek_paint=True,
+    burst_color=(60, 60, 255),
 )
 
 NEW_YEAR = Festival(
     key="6",
     title="HAPPY NEW YEAR!",
-    subtitle="pinch to ring in the midnight sky",
+    hint="pinch the sky to ring in midnight   |   raise a hand for confetti",
     palette=[GOLD, MAGENTA, PINK, CYAN, GREEN],
-    fireworks=True,
+    garland=True,
     confetti=True,
+    stars=True,
+    rain=True,
+    burst_color=GOLD,
 )
 
 FESTIVALS = (HOLI, DIWALI, RAKHI, EID, CHRISTMAS, NEW_YEAR)

@@ -1,14 +1,15 @@
-"""FestiCam engine: one stage, six festivals, webcam hands drive the magic.
+"""FestiCam engine: your camera IS the festival stage.
 
-Pipeline = run_over_frame(frame, session, hand) exactly like its siblings
-(airjam/airmath), so the whole thing is headless-testable.
+Pipeline = run_over_frame(staged_camera, session, hand, face), fully
+headless-testable like its siblings (airjam/airmath).
 
-Interactions per festival are data-driven (see festivals.py):
-  * spray      - index finger pointing paints palette particles from the tip
-  * fireworks  - pinch launches a firework where the fingers meet
-  * wrist_ring - a decorative ring + sparkles keep to your wrist
-  * snow / stars / confetti / diyas / crescent / stains  - ambience layers
-Music: drum grooves or bell melodies scheduled on the frame clock.
+Feel of the app (per the product vision): the camera fills the screen
+first, sticker-grade festive art frames it, and everything is one
+effortless gesture away -
+  * tilt your head -> gulaal lands on that very cheek
+  * raise a hand   -> paani falls
+  * pinch          -> a color burst
+No sound. No menus. Keys 1-6 switch the festival.
 """
 
 from __future__ import annotations
@@ -19,12 +20,16 @@ import sys
 
 import numpy as np
 
-from .festivals import FESTIVALS, Festival, GOLD, PINK, WHITEISH
-from .synth import Player
+from .art import make_garland, make_moon, make_rangoli, make_splash, stamp, overlay
+from .faces import FaceState, FaceTracker
+from .festivals import FESTIVALS, Festival, GOLD, WATER, WHITEISH
 from .tracker import HandState, HandTracker
 
-ON, OFF = 0.45, 0.58   # pinch hysteresis (same proven pair as AirJam)
-SPRAY_RATE = 7          # drops spawned per frame while pointing
+ON, OFF = 0.45, 0.58    # pinch hysteresis (proven pair from AirJam)
+COOLDOWN = 6            # frames between bursts
+RAIN_Y = 0.45           # wrist above this fraction of height = hand raised
+TILT_ON, TILT_OFF = 0.30, 0.16   # cheek-paint hysteresis (normalized eye-line slope)
+CHEEK_STAMPS_MAX = 26
 
 
 class Session:
@@ -33,28 +38,21 @@ class Session:
     def __init__(self, width: int = 1280, height: int = 720):
         self.width = width
         self.height = height
-        self.fest = 0                     # index into FESTIVALS
-        self.fest_start = 0               # tick when switched (banner animation)
-        self.player = Player()
+        self.fest = 0
+        self.fest_start = 0
         self.tick = 0
-        self.splash: list[list] = []      # [x, y, vx, vy, age, life, color]
-        self.stains: list[list] = []      # painted gulaal [x, y, r, color, alpha]
+        self.paints: list[list] = []      # cheek dabs [x, y, scale, sprite_idx, alpha]
+        self.drops: list[list] = []       # paani droplets [x, y, vy, age, life]
         self.flakes: list[list] = []      # snow / confetti [x, y, vy, sway, color]
         self.twinkles: list[tuple[int, int]] = []
-        self.trail: list[tuple[int, int]] = []
-        self.notes: dict[str, int] = {}   # music scheduler state
+        self.trail: list[tuple[int, int]] = []          # fingertip sparkle trail
         self.pinch_closed = False
-        self.diya_flicker = 0
-        self.stage = self._make_stage()
+        self.last_burst = -99
+        self.tilt_armed = True            # face must come back level before next dab
+        self._sprites: dict[int, np.ndarray] = {}
+        self._art_cache: dict[int, dict] = {}
 
-    def _make_stage(self) -> np.ndarray:
-        """Deep festival night gradient - drawn once, copied each frame."""
-        yy = np.linspace(0, 1, self.height)[:, None]
-        base = np.zeros((self.height, self.width, 3), dtype=np.float32)
-        base[..., 0] = 60 * (1 - yy) + 34
-        base[..., 1] = 20 * (1 - yy) + 12
-        base[..., 2] = 34 * (1 - yy) + 18
-        return base.astype(np.uint8)
+    # ----- festival helpers ----------------------------------------------
 
     @property
     def festival(self) -> Festival:
@@ -63,266 +61,298 @@ class Session:
     def switch(self, idx: int) -> None:
         self.fest = idx % len(FESTIVALS)
         self.fest_start = self.tick
-        self.stains.clear()
-        self.splash.clear()
+        self.paints.clear()
+        self.drops.clear()
         self.flakes.clear()
         self.twinkles.clear()
-        self.notes = {}
+        self.tilt_armed = True
 
     def next(self) -> None:
         self.switch(self.fest + 1)
 
-    def burst(self, x: int, y: int, color: int, n: int = 26, speed: float = 7.0) -> None:
+    # ----- actions ---------------------------------------------------------
+
+    def sprite(self, color) -> np.ndarray:
+        key = tuple(int(c) for c in color)
+        if key not in self._sprites:
+            self._sprites[key] = make_splash(46, key)
+        return self._sprites[key]
+
+    def dab_cheek(self, x: int, y: int, color) -> None:
+        """One persistent gulaal dab on a cheek."""
+        self.paints.append([int(x), int(y), 0.82, tuple(color)])
+        if len(self.paints) > CHEEK_STAMPS_MAX:
+            self.paints.pop(0)
+
+    def burst(self, x: int, y: int, color, n: int = 30, speed: float = 7.5) -> None:
         rng = np.random.default_rng(self.tick * 8 + n)
         for _ in range(n):
             angle = rng.uniform(0, 2 * math.pi)
             v = rng.uniform(speed * 0.35, speed)
-            self.splash.append([
-                x, y, int(math.cos(angle) * v), int(math.sin(angle) * v) - 2,
-                0, int(rng.uniform(30, 52)), color,
-            ])
+            self._splash_append(x, y, math.cos(angle) * v, math.sin(angle) * v - 2,
+                                int(rng.uniform(26, 44)), color)
 
-    def spray_at(self, x: int, y: int, dx: float, dy: float, color: int) -> None:
-        """Pichkari! drops leave the fingertip along the finger's motion."""
+    def rain_at(self, x: int) -> None:
+        """Paani! droplets spawn above and fall past the raised hand."""
         rng = np.random.default_rng(self.tick)
-        for _ in range(SPRAY_RATE):
-            self.splash.append([
-                x, y,
-                int(dx * 0.8 + rng.uniform(-2, 2)),
-                int(dy * 0.8 + rng.uniform(-2, 2)),
-                0, int(rng.uniform(16, 34)), color,
-            ])
+        for _ in range(3):
+            self._splash_append(x + int(rng.uniform(-46, 46)), int(-rng.uniform(0, 60)),
+                                int(rng.uniform(-1, 1)), int(rng.uniform(4, 7)), int(rng.uniform(60, 90)),
+                                WATER, rain=True)
 
-    def spawn_ambience(self) -> None:
-        f = self.festival
-        if f.snow or f.confetti:
-            while len(self.flakes) < (90 if f.snow else 120):
-                rng = np.random.default_rng(self.tick * len(self.flakes) + len(self.flakes))
-                color = WHITEISH if f.snow else f.palette[len(self.flakes) % len(f.palette)]
-                self.flakes.append([
-                    rng.integers(0, self.width), int(-rng.uniform(0, self.height)),
-                    int(rng.integers(2, 5)), int(rng.integers(14, 40)), color,
-                ])
-        elif self.flakes:
-            self.flakes.clear()
-        if f.stars:
-            while len(self.twinkles) < 70:
-                rng = np.random.default_rng(self.tick * len(self.twinkles) + 7)
-                self.twinkles.append((int(rng.integers(0, self.width)),
-                                      int(rng.integers(0, int(self.height * 0.72)))))
-        elif self.twinkles:
-            self.twinkles.clear()
+    def _splash_append(self, x, y, vx, vy, life, color, rain=False) -> None:
+        self.drops.append([x, y, vx, vy, 0, life, tuple(color), rain])
+
+    def art_for(self, fest: Festival) -> dict:
+        """(Re)make corner art lazily when the festival changes palette."""
+        key = id(fest)
+        cache = getattr(self, "_art_cache", {})
+        if key not in cache:
+            cache = {key: {
+                "garland": make_garland(self.width, list(fest.palette)) if fest.garland else None,
+                "rangoli": make_rangoli(int(self.width * 0.11), fest.palette) if fest.rangoli else None,
+                "moon": make_moon(64, GOLD) if fest.moon else None,
+            }}
+            self._art_cache = cache
+        return cache[key]
 
 
-def pinch_test(session: Session, pinch: list[float]) -> bool:
-    """Hysteresis pinch; True on a fresh pinch-close (for fireworks etc.)."""
-    fired = False
-    d = pinch[1]                      # thumb-index pinch is the "action" gesture
-    if not session.pinch_closed and d < ON:
+def stage_frame(raw: np.ndarray, session: Session) -> np.ndarray:
+    """Center-crop to 16:9 and upscale + sharpen + color-grade to full HD.
+
+    This is the "camera is the stage" step: the sensor's 480x640 becomes a
+    full-screen, premium-looking image before any FX touch it.
+    """
+    import cv2
+
+    h, w = raw.shape[:2]
+    target = session.width / session.height
+    if w / h > target:                     # too wide -> crop sides
+        cw = int(h * target)
+        x0 = (w - cw) // 2
+        crop = raw[:, x0:x0 + cw]
+    else:                                  # too tall -> crop top/bottom
+        ch = int(w / target)
+        y0 = max(0, (h - ch) // 2)
+        crop = raw[y0:y0 + ch]
+    out = cv2.resize(crop, (session.width, session.height), interpolation=cv2.INTER_CUBIC)
+    # premium finish: unsharp mask + gentle warm grade (looks like real FHD)
+    blur = cv2.GaussianBlur(out, (0, 0), 2.2)
+    out = cv2.addWeighted(out, 1.32, blur, -0.32, 0)
+    out = cv2.convertScaleAbs(out, alpha=1.06, beta=3)
+    out[:, :, 2] = np.clip(out[:, :, 2].astype(np.int16) + 6, 0, 255).astype(np.uint8)
+    return out
+
+
+def face_dab(session: Session, face: FaceState) -> None:
+    """Head tilt -> gulaal lands on the cheek on that exact side."""
+    f = session.festival
+    if not f.cheek_paint:
+        return
+    if abs(face.tilt) < TILT_ON:
+        session.tilt_armed = abs(face.tilt) < TILT_OFF
+        return
+    if not session.tilt_armed:
+        return
+    cheek = face.cheeks[0] if face.tilt < 0 else face.cheeks[1]
+    color = f.palette[(session.tick // 3) % len(f.palette)]
+    session.dab_cheek(*cheek, color)
+    session.tilt_armed = False
+
+
+def update_rain(session: Session, hand: HandState | None) -> None:
+    """Hand raised -> paani falls from above, down past the hand."""
+    if hand is not None and session.festival.rain and hand.wrist[1] < RAIN_Y * session.height:
+        session.rain_at(hand.wrist[0])
+
+
+def pinch_burst(session: Session, hand: HandState) -> None:
+    d = hand.pinch[1]                    # thumb-index is the action gesture
+    if not session.pinch_closed and d < ON and session.tick - session.last_burst > COOLDOWN:
         session.pinch_closed = True
-        fired = True
+        session.last_burst = session.tick
+        tip = hand.tips[1]
+        color = session.festival.burst_color
+        session.burst(tip[0], tip[1], color, n=34, speed=8.5)
+        session.burst(tip[0], tip[1],
+                      session.festival.palette[(session.tick // 5) % len(session.festival.palette)],
+                      n=18, speed=5.5)
     elif session.pinch_closed and d > OFF:
         session.pinch_closed = False
-    return fired
 
 
-def schedule_music(session: Session) -> None:
-    """Frame-clock music scheduler; grooves or melodies per festival."""
+def spawn_ambience(session: Session) -> None:
     f = session.festival
-    if f.melody:
-        notes = f.melody
-        key = "mel"
-        idx = session.notes.get(key, 0)
-        started = session.notes.get("mel_start", None)
-        if started is None:
-            session.notes["mel_start"] = session.tick
-            started = session.tick
-        # rest gaps accumulate beats until we reach the current note
-        beats_per_frame = 60 / 14000.0            # ~ 92 BPM at 30 fps
-        # simpler: one note every 16 frames
-        if session.tick - started >= 30:
-            note, _beats = notes[idx % len(notes)]
-            session.notes[key] = idx + 1
-            session.notes["mel_start"] = session.tick
-            if note:
-                session.player.play_note(note)
-    elif f.groove:
-        idx = session.notes.get("groove", 0)
-        started = session.notes.get("groove_start", session.tick)
-        if session.tick - started >= 15:
-            drum = f.groove[idx % len(f.groove)]
-            session.notes["groove"] = idx + 1
-            session.notes["groove_start"] = session.tick
-            session.player.play(drum)
-            session.burst(*pad_hint(session, drum), color=next_palette(session), n=8, speed=3.5)
-
-
-def next_palette(session: Session) -> int:
-    return session.festival.palette[session.tick % len(session.festival.palette)]
-
-
-def pad_hint(session: Session, drum: int) -> tuple[int, int]:
-    w, h = session.width, session.height
-    return {2: (int(w * 0.25), int(h * 0.80)),
-            0: (int(w * 0.18), int(h * 0.82)),
-            1: (int(w * 0.35), int(h * 0.84)),
-            3: (int(w * 0.75), int(h * 0.80))}[drum]
+    want = 90 if f.snow else (120 if f.confetti else 0)
+    if want and len(session.flakes) < want:
+        rng = np.random.default_rng(session.tick * 13 + len(session.flakes))
+        while len(session.flakes) < want:
+            color = WHITEISH if f.snow else f.palette[len(session.flakes) % len(f.palette)]
+            session.flakes.append([int(rng.integers(0, session.width)),
+                                   int(-rng.integers(0, session.height)),
+                                   int(rng.integers(2, 5)), int(rng.integers(14, 40)), color])
+    elif not want and session.flakes:
+        session.flakes.clear()
+    if f.stars and len(session.twinkles) < 70:
+        rng = np.random.default_rng(session.tick * 7 + 11)
+        while len(session.twinkles) < 70:
+            session.twinkles.append((int(rng.integers(0, session.width)),
+                                     int(rng.integers(0, int(session.height * 0.72)))))
+    elif not f.stars and session.twinkles:
+        session.twinkles.clear()
 
 
 def _step_fx(session: Session) -> None:
     alive = []
-    up = 0.55 if session.festival.snow else 0.0
-    for s in session.splash:
-        s[0] += s[2]
-        s[1] += s[3]
-        s[3] += 1                                   # gravity
-        s[4] += 1
-        if s[4] < s[5] and -40 < s[0] < session.width + 40 and s[1] < session.height + 10:
-            alive.append(s)
-    session.splash = alive
-    for fl in session.flakes:
-        fl[0] += int(2 * math.sin((session.tick + fl[3]) / fl[2]))
-        fl[1] += fl[2] + 1
-        if fl[1] > session.height:
-            fl[1] = -6
-    f = session.festival
-    for s in list(session.stains):
-        s[4] *= 0.999
+    for d in session.drops:
+        d[0] += int(d[2])
+        d[1] += int(d[3])
+        d[3] += 1.1                                # gravity
+        d[4] += 1
+        if d[4] < d[5] and d[1] < session.height + 8:
+            alive.append(d)
+    session.drops = alive
 
 
-def run_over_frame(frame_bgr: np.ndarray, session: Session, hand: HandState | None) -> np.ndarray:
-    """Advance one frame; returns the annotated display frame."""
+def run_over_frame(frame_bgr: np.ndarray, session: Session,
+                   hand: HandState | None = None, face: FaceState | None = None) -> np.ndarray:
+    """Advance one frame; the frame is the full-screen camera image itself."""
     import cv2
 
     session.tick += 1
-    session.spawn_ambience()
-    schedule_music(session)
+    spawn_ambience(session)
 
     prev = session.trail[-1] if session.trail else None
     if hand is not None:
         session.trail.append((int(hand.x), int(hand.y)))
-        if len(session.trail) > 26:
+        if len(session.trail) > 22:
             del session.trail[:6]
-        if session.festival.spray and session.tick % 2 == 0:
-            x, y = hand.x, hand.y
-            dx, dy = 0, -1
-            if prev:
-                dx, dy = x - prev[0], y - prev[1]
-            session.spray_at(x, y, dx, dy, next_palette(session))
-        if hand.pinch[1] < ON:
-            f = session.festival
-            if f.fireworks and pinch_test(session, hand.pinch):
-                x, y = hand.x, max(60, hand.y - 120)
-                color = next_palette(session)
-                session.burst(x, y, color, n=40, speed=8.5)
-                session.burst(x, y, next_palette(session), n=24, speed=5.5)
-                session.player.play(2, pitch=0.9)
-            elif f.stains:
-                session.burst(hand.x, hand.y, next_palette(session), n=30, speed=6.0)
-                session.stains.append([hand.x, hand.y, 46, next_palette(session), 0.30])
+        _paint_trail(session, prev)
+        update_rain(session, hand)
+        pinch_burst(session, hand)
+    if face is not None:
+        face_dab(session, face)
     _step_fx(session)
 
-    scene = session.stage.copy()
-    _paint_stains(scene, session)
-    _draw_ambience(scene, session)
-    if session.festival.crescent:
-        _draw_crescent(scene, session)
-    if session.festival.diyas:
-        _draw_diyas(scene, session)
-    _draw_splash(scene, session)
+    scene = frame_bgr
+    _vignette_bottom(scene)
+    art = session.art_for(session.festival)
+    if art["rangoli"] is not None:
+        r = art["rangoli"]
+        stamp_true(scene, r, int(session.width * 0.075), int(session.height * 0.86), 1.0, 0.9)
+        stamp_true(scene, flip_h(r), session.width - int(session.width * 0.075),
+                   int(session.height * 0.86), 1.0, 0.9)
+    if art["moon"] is not None:
+        stamp_true(scene, art["moon"], session.width - int(session.width * 0.10),
+                   int(session.height * 0.24), 1.0, 0.96)
+    if art["garland"] is not None:
+        overlay(scene, art["garland"], 0, 0, 0.97)
+
+    _draw_twinkles(scene, session)
+    _draw_flakes(scene, session)
+    _draw_drops(scene, session)
+    _draw_paints(scene, session)
     if hand is not None:
-        if session.festival.wrist_ring:
-            _draw_wrist_ring(scene, session, hand)
         _draw_cursor(scene, session, hand)
     _draw_banner(scene, session)
-    _draw_camera_card(scene, session, frame_bgr)
     _hud(scene, session)
     return scene
 
 
-def _paint_stains(scene: np.ndarray, session: Session) -> None:
+def stamp_true(scene, art, cx, cy, scale, alpha):
     import cv2
 
-    for x, y, r, color, alpha in session.stains[-90:]:
-        overlay = tuple(int(c * alpha) for c in color)
-        cv2.circle(scene, (int(x), int(y)), int(r), overlay, -1, cv2.LINE_AA)
+    if scale != 1.0:
+        art = cv2.resize(art, (int(art.shape[1] * scale), int(art.shape[0] * scale)),
+                         interpolation=cv2.INTER_AREA)
+    overlay(scene, art, cx - art.shape[1] // 2, cy - art.shape[0] // 2, alpha)
 
 
-def _draw_ambience(scene: np.ndarray, session: Session) -> None:
+def flip_h(art: np.ndarray) -> np.ndarray:
+    return art[:, ::-1].copy()
+
+
+def _vignette_bottom(scene: np.ndarray) -> None:
+    """Soften the very bottom for HUD readability (cheap gradient band)."""
     import cv2
 
-    for x, y, _vy, sway, color in session.flakes:
-        cv2.circle(scene, (int(x + 2 * math.sin((session.tick + sway) / sway * 4)), int(y)),
-                   3 if session.festival.snow else 4, color, -1, cv2.LINE_AA)
+    h = scene.shape[0]
+    band = 110
+    grad = np.linspace(0, 1, band, dtype=np.float32)[:, None, None] * 0.42
+    strip = (scene[h - band:] * (1 - grad)).astype(np.uint8)
+    scene[h - band:] = strip
+
+
+def _draw_twinkles(scene: np.ndarray, session: Session) -> None:
+    import cv2
+
     for i, (x, y) in enumerate(session.twinkles):
         tw = 0.5 + 0.5 * math.sin((session.tick + i * 13) / 17.0)
-        c = tuple(int(v * (0.25 + tw)) for v in GOLD)
+        c = tuple(int(v * (0.3 + tw * 0.8)) for v in GOLD)
         cv2.circle(scene, (x, y), 2 + int(2 * tw), c, -1, cv2.LINE_AA)
 
 
-def _draw_crescent(scene: np.ndarray, session: Session) -> None:
+def _draw_flakes(scene: np.ndarray, session: Session) -> None:
     import cv2
 
-    cx, cy, r = session.width - 150, 110, 52
-    cv2.circle(scene, (cx, cy), r, GOLD, -1, cv2.LINE_AA)
-    cv2.circle(scene, (cx + int(r * 0.55), cy - int(r * 0.18)), int(r * 0.88), (18, 12, 28), -1)
-    for dx, dy in ((-r, int(r * 0.6)), (-int(r * 1.3), int(r * 0.9))):
-        tw = 0.5 + 0.5 * math.sin((session.tick + dx) / 13.0)
-        cv2.circle(scene, (cx + dx, cy + dy), 3 + int(2 * tw), tuple(int(v * tw) for v in GOLD), -1)
+    snow = session.festival.snow
+    for fl in session.flakes:
+        fl[0] += int(2 * math.sin((session.tick + fl[3]) / fl[2] * 4))
+        fl[1] += fl[2] + 1
+        if fl[1] > session.height:
+            fl[1] = -6
+        cv2.circle(scene, (int(fl[0]), int(fl[1])), 3 if snow else 4, fl[4], -1, cv2.LINE_AA)
 
 
-def _draw_diyas(scene: np.ndarray, session: Session) -> None:
+def _draw_drops(scene: np.ndarray, session: Session) -> None:
     import cv2
 
-    n = 7
-    for i in range(n):
-        x = int(session.width * (i + 1) / (n + 1))
-        y = session.height - 34
-        flick = 0.5 + 0.5 * math.sin((session.tick + i * 9) / 6.0)
-        cv2.ellipse(scene, (x, y), (22, 9), 0, 0, 180, (40, 120, 220), -1)   # diya bowl
-        flame = 10 + int(5 * flick)
-        cv2.ellipse(scene, (x, y - flame // 2), (6, flame), 0, 0, 360, (60, 150, 255), -1)  # flame
-        halo = tuple(int(v * (0.25 + 0.3 * flick)) for v in GOLD)
-        cv2.circle(scene, (x, y - flame), 26 + int(8 * flick), halo, 1, cv2.LINE_AA)
-
-
-def _draw_splash(scene: np.ndarray, session: Session) -> None:
-    import cv2
-
-    for x, y, _vx, _vy, age, life, color in session.splash:
+    for x, y, vx, vy, age, life, color, rain in session.drops:
         fade = max(0.15, 1.0 - age / max(life, 1))
         c = tuple(int(v * fade) for v in color)
-        cv2.circle(scene, (int(x), int(y)), 4 if fade > 0.5 else 3, c, -1)
+        r = 5 if rain else max(2, int(7 * fade))
+        if rain:                                   # teardrop: tail + bead
+            cv2.line(scene, (int(x), int(y - 14)), (int(x), int(y)), tuple(int(v * fade * 0.5) for v in color), 1,
+                     cv2.LINE_AA)
+        cv2.circle(scene, (int(x), int(y)), r, c, -1, cv2.LINE_AA)
+        cv2.circle(scene, (int(x) - 1, int(y) - 1), max(1, r // 3), (255, 255, 255), -1, cv2.LINE_AA)
 
 
-def _draw_wrist_ring(scene: np.ndarray, session: Session, hand: HandState) -> None:
-    import cv2
+def _draw_paints(scene: np.ndarray, session: Session) -> None:
+    for x, y, alpha, color in session.paints:
+        stamp(scene, session.sprite(color), x, y, scale=1.0, alpha=alpha)
 
-    # wrist is landmark 0 -> tips list has no wrist; approximate midpoint between fingertips
-    xs = [t[0] for t in hand.tips]
-    ys = [t[1] for t in hand.tips]
-    cx, cy = int(sum(xs) / len(xs)), int(max(ys) + 34)
-    r = 34
-    for k, (rr, thick) in enumerate(((r + 8, 2), (r + 3, 4), (r, 3))):
-        color = [GOLD, PINK, GOLD][k] if k in (0, 2) else next_palette(session)
-        cv2.circle(scene, (cx, cy), rr + int(2 * math.sin((session.tick + k) / 5)), color, thick, cv2.LINE_AA)
-    for i in range(8):
-        a = i * math.pi / 4 + session.tick / 40
-        px, py = cx + int((r + 5) * math.cos(a)), cy + int((r + 5) * math.sin(a))
-        cv2.circle(scene, (px, py), 3, GOLD, -1, cv2.LINE_AA)
+
+def _paint_trail(session: Session, prev) -> None:
+    """Fingertip paani sprays down as you move (Holi-style ambience)."""
+    if prev is None or session.tick % 2:
+        return
+    f = session.festival
+    color = WATER if f.rain else f.burst_color
+    session._splash_append(hand_x(session), hand_y(session),
+                           0, 4, 18, color, rain=True)
+
+
+def hand_x(session: Session) -> int:
+    return session.trail[-1][0]
+
+
+def hand_y(session: Session) -> int:
+    return session.trail[-1][1]
 
 
 def _draw_cursor(scene: np.ndarray, session: Session, hand: HandState) -> None:
     import cv2
 
-    pts = session.trail[-22:]
+    pts = session.trail[-18:]
+    color = session.festival.burst_color
     for i in range(1, len(pts)):
         t = i / len(pts)
-        cv2.line(scene, pts[i - 1], pts[i], (int(220 * t), int(210 * t), int(255 * t)),
-                 max(1, int(5 * t)), cv2.LINE_AA)
+        col = tuple(int(c * t) for c in color)
+        cv2.line(scene, pts[i - 1], pts[i], col, max(1, int(4 * t)), cv2.LINE_AA)
     tip = hand.tips[1]
-    glow = tuple(int(c * 0.5) for c in next_palette(session))
-    cv2.circle(scene, tuple(tip), 11, glow, -1, cv2.LINE_AA)
+    glow = tuple(int(c * 0.55) for c in color)
+    cv2.circle(scene, tuple(tip), 12, glow, -1, cv2.LINE_AA)
     cv2.circle(scene, tuple(tip), 6, (255, 255, 255), -1, cv2.LINE_AA)
 
 
@@ -331,44 +361,30 @@ def _draw_banner(scene: np.ndarray, session: Session) -> None:
 
     f = session.festival
     age = session.tick - session.fest_start
-    slide = max(0.0, 1.0 - age / 16.0)   # drop-in banner (~0.5 s)
-    y = int(58 - 150 * slide)
-    scale = 1.5 if len(f.title) <= 18 else 1.15
-    (tw, _), _ = cv2.getTextSize(f.title, cv2.FONT_HERSHEY_SIMPLEX, scale, 3)
+    slide = max(0.0, 1.0 - age / 16.0)
+    y = int(210 - 160 * slide)
+    scale = 1.1 if len(f.title) <= 18 else 0.9
+    (tw, _), _ = cv2.getTextSize(f.title, cv2.FONT_HERSHEY_COMPLEX, scale, 3)
     x = (session.width - tw) // 2
-    shimmy = int(3 * math.sin(session.tick / 28))
-    # soft shadow + gradient double-strike keeps big type readable over fx
-    cv2.putText(scene, f.title, (x + 3, y + 3), cv2.FONT_HERSHEY_SIMPLEX, scale, (20, 20, 30), 3, cv2.LINE_AA)
-    c1 = f.palette[session.tick % len(f.palette)]
-    c2 = f.palette[(session.tick // 40) % len(f.palette)]
-    cv2.putText(scene, f.title, (x, y + shimmy), cv2.FONT_HERSHEY_SIMPLEX, scale, c1, 3, cv2.LINE_AA)
-    cv2.putText(scene, f.title, (x, y + shimmy), cv2.FONT_HERSHEY_SIMPLEX, scale, c2, 1, cv2.LINE_AA)
-    (tw2, _), _ = cv2.getTextSize(f.subtitle, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-    cv2.putText(scene, f.subtitle, ((session.width - tw2) // 2, y + 36),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (225, 225, 225), 1, cv2.LINE_AA)
-
-
-def _draw_camera_card(scene: np.ndarray, session: Session, frame_bgr: np.ndarray) -> None:
-    import cv2
-
-    card_w = max(190, session.width // 6)
-    h, w = frame_bgr.shape[:2]
-    card_h = int(card_w * h / w)
-    x0 = session.width - card_w - 24
-    y0 = session.height - card_h - 24
-    card = cv2.resize(frame_bgr, (card_w, card_h), interpolation=cv2.INTER_AREA)
-    card = cv2.addWeighted(card, 1.22, cv2.GaussianBlur(card, (0, 0), 3), -0.22, 6)
-    cv2.rectangle(scene, (x0 + 4, y0 + 5), (x0 + card_w + 4, y0 + card_h + 5), (8, 8, 8), -1)
-    scene[y0:y0 + card_h, x0:x0 + card_w] = card
-    cv2.rectangle(scene, (x0 - 2, y0 - 2), (x0 + card_w + 2, y0 + card_h + 2), (235, 235, 235), 2, cv2.LINE_AA)
+    shimmy = int(2 * math.sin(session.tick / 30))
+    soft = tuple(int(c * 0.4) for c in f.burst_color)
+    cv2.putText(scene, f.title, (x + 2, y + 2), cv2.FONT_HERSHEY_COMPLEX, scale, (18, 18, 26), 4, cv2.LINE_AA)
+    cv2.putText(scene, f.title, (x, y + shimmy), cv2.FONT_HERSHEY_COMPLEX, scale, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(scene, f.title, (x, y + shimmy), cv2.FONT_HERSHEY_COMPLEX, scale, soft, 1, cv2.LINE_AA)
+    (tw2, _), _ = cv2.getTextSize(f.hint, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 1)
+    cv2.putText(scene, f.hint, ((session.width - tw2) // 2, y + 34),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.56, (238, 238, 238), 1, cv2.LINE_AA)
 
 
 def _hud(scene: np.ndarray, session: Session) -> None:
     import cv2
 
-    f = session.festival
-    cv2.putText(scene, f"FestiCam - {f.title.lower()}   |   keys 1-6 festival   SPACE music   c burst   q quit",
-                (20, scene.shape[0] - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (225, 225, 225), 1, cv2.LINE_AA)
+    text = "1-6 festivals     c clean the cheeks     q quit"
+    cv2.putText(scene, text, (22, scene.shape[0] - 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (234, 234, 234), 1, cv2.LINE_AA)
+    cv2.putText(scene, f"FestiCam  {session.festival.title.lower()}",
+                (scene.shape[1] - 262, scene.shape[0] - 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (196, 196, 196), 1, cv2.LINE_AA)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -379,19 +395,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        import mediapipe  # noqa: F401
-    except ImportError:
-        print("FestiCam needs mediapipe: pip install mediapipe")
-        return 2
-    try:
         import cv2
     except ImportError:
         print("FestiCam needs opencv-python: pip install opencv-python")
         return 2
+    try:
+        import mediapipe  # noqa: F401
+    except ImportError:
+        print("FestiCam needs mediapipe: pip install mediapipe")
+        return 2
 
     session = Session(width=args.width, height=args.height)
-    print("audio backend:", session.player.backend)
-    tracker = HandTracker()
+    hand_tracker = HandTracker()
+    face_tracker = FaceTracker()
+
     if sys.platform == "win32":
         cam = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
         if not cam.isOpened():
@@ -401,33 +418,32 @@ def main(argv: list[str] | None = None) -> int:
     if not cam.isOpened():
         print("could not open camera %d" % args.camera)
         return 2
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     win = "FestiCam - festival in your camera"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     cv2.waitKey(1)
-    print("FestiCam  -  Holi first. press 1-6 to visit festivals, ESC to quit.")
+    print("FestiCam (silent edition) - tilt head to paint cheeks, raise hand for paani, pinch to burst. 1-6 festivals, q quit.")
     try:
         while True:
-            ok, frame = cam.read()
+            ok, raw = cam.read()
             if not ok:
                 break
-            frame = cv2.flip(frame, 1)
-            hand = tracker.process(frame)
-            out = run_over_frame(frame, session, hand)
+            raw = cv2.flip(raw, 1)                      # mirror: screen matches the user
+            frame = stage_frame(raw, session)
+            hand = hand_tracker.process(frame)
+            face = face_tracker.process(frame)
+            out = run_over_frame(frame, session, hand, face)
             cv2.imshow(win, out)
-            keyl = cv2.waitKeyEx(1)
-            key = keyl & 0xFF
+            key = cv2.waitKeyEx(1) & 0xFF
             if key == ord("q") or key == 27:
                 break
             if key in b"123456":
                 session.switch(key - ord("1"))
             elif key == ord("c"):
-                session.stains.clear()
-            elif key == ord("n"):
-                session.next()
+                session.paints.clear()
     except KeyboardInterrupt:
         pass
     except Exception:
@@ -436,7 +452,8 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         return 1
     finally:
-        tracker.close()
+        hand_tracker.close()
+        face_tracker.close()
         cam.release()
         cv2.destroyAllWindows()
     return 0

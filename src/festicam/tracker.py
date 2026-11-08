@@ -29,9 +29,10 @@ MIDDLE_MCP = 9
 
 @dataclass
 class HandState:
-    """Fingertip screen positions + normalized pinch distances per finger."""
+    """Fingertip + wrist screen positions, normalized pinch distances."""
 
     tips: list[list[int]]          # [(x, y)] x5: thumb, index, middle, ring, pinky
+    wrist: tuple[int, int]         # landmark 0 (raised-hand / rain detection)
     pinch: list[float]             # thumb-tip distance / hand scale, x4 (index..pinky)
     x: int                         # index fingertip x (for FX)
     y: int
@@ -121,10 +122,11 @@ class HandTracker:
 def _state_from(lm, w: int, h: int) -> HandState:
     scale = max(_dist(lm, MIDDLE_MCP, WRIST), 1e-6)
     tips = [[int(lm[i].x * w), int(lm[i].y * h)] for i in TIPS]
+    wrist = (int(lm[WRIST].x * w), int(lm[WRIST].y * h))
 
     # thumb-tip to each fingertip, normalized by hand size
     pinch = [_dist(lm, TIPS[k], TIPS[0]) / scale for k in (1, 2, 3, 4)]
-    return HandState(tips=tips, pinch=pinch, x=tips[1][0], y=tips[1][1])
+    return HandState(tips=tips, wrist=wrist, pinch=pinch, x=tips[1][0], y=tips[1][1])
 
 
 def _dist(lm, a: int, b: int) -> float:

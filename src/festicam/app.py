@@ -20,7 +20,7 @@ import sys
 
 import numpy as np
 
-from .art import make_garland, make_moon, make_rangoli, make_splash, stamp, overlay
+from .art import make_garland, make_lights, make_moon, make_rangoli, make_splash, make_wash, stamp, overlay
 from .faces import FaceState, FaceTracker
 from .festivals import FESTIVALS, Festival, GOLD, WATER, WHITEISH
 from .tracker import HandState, HandTracker
@@ -30,6 +30,9 @@ COOLDOWN = 6            # frames between bursts
 RAIN_Y = 0.45           # wrist above this fraction of height = hand raised
 TILT_ON, TILT_OFF = 0.30, 0.16   # cheek-paint hysteresis (normalized eye-line slope)
 CHEEK_STAMPS_MAX = 26
+GLIDE_MIN = 9.0         # fingertip speed (px/frame) that starts a ribbon
+RIBBON_MAX = 220        # ribbon segments kept on screen
+WASH_ALPHA = 0.5
 
 
 class Session:
@@ -41,9 +44,12 @@ class Session:
         self.fest = 0
         self.fest_start = 0
         self.tick = 0
-        self.paints: list[list] = []      # cheek dabs [x, y, scale, sprite_idx, alpha]
+        self.paints: list[list] = []      # cheek dabs [x, y, alpha, color]
         self.drops: list[list] = []       # paani droplets [x, y, vy, age, life]
         self.flakes: list[list] = []      # snow / confetti [x, y, vy, sway, color]
+        self.ribbons: list[list] = []     # glide ribbons [x0, y0, x1, y1, color, age, life, width]
+        self.embers: list[list] = []      # rising sparks [x, y, vy, sway, age, life, color]
+        self._sm = None                   # smoothed fingertip for ribbon control
         self.twinkles: list[tuple[int, int]] = []
         self.trail: list[tuple[int, int]] = []          # fingertip sparkle trail
         self.pinch_closed = False
@@ -65,7 +71,15 @@ class Session:
         self.drops.clear()
         self.flakes.clear()
         self.twinkles.clear()
+        self.ribbons.clear()
+        self.embers.clear()
+        self._sm = None
         self.tilt_armed = True
+        # welcome burst: the new festival paints its own arrival
+        f = self.festival
+        for i in range(3):
+            self.burst(int(self.width * (0.3 + 0.2 * i)), int(self.height * 0.34 + 26 * i),
+                       f.palette[i % len(f.palette)], n=14, speed=6.0)
 
     def next(self) -> None:
         self.switch(self.fest + 1)
@@ -104,14 +118,16 @@ class Session:
         self.drops.append([x, y, vx, vy, 0, life, tuple(color), rain])
 
     def art_for(self, fest: Festival) -> dict:
-        """(Re)make corner art lazily when the festival changes palette."""
+        """(Re)make scene art lazily per festival - each one its own identity."""
         key = id(fest)
         cache = getattr(self, "_art_cache", {})
         if key not in cache:
             cache = {key: {
                 "garland": make_garland(self.width, list(fest.palette)) if fest.garland else None,
+                "lights": make_lights(self.width, list(fest.palette)) if fest.lights else None,
                 "rangoli": make_rangoli(int(self.width * 0.11), fest.palette) if fest.rangoli else None,
                 "moon": make_moon(64, GOLD) if fest.moon else None,
+                "wash": make_wash(self.width, self.height, *fest.wash) if fest.wash else None,
             }}
             self._art_cache = cache
         return cache[key]
@@ -166,6 +182,42 @@ def update_rain(session: Session, hand: HandState | None) -> None:
         session.rain_at(hand.wrist[0])
 
 
+def update_ribbon(session: Session, hand: HandState | None) -> None:
+    """Glide your hand -> the fingertip leaves a thick paint ribbon in the air.
+
+    This is FestiCam's signature interaction: you literally draw in the air
+    with festival colors. Fast strokes = thick vivid ribbons; stop moving
+    and the paint hangs there, then slowly melts away.
+    """
+    if hand is None:
+        return
+    tip = (int(hand.tips[1][0]), int(hand.tips[1][1]))
+    sm = session._sm
+    if sm is None:
+        session._sm = tip
+        return
+    gx = int(sm[0] * 0.55 + tip[0] * 0.45)      # smooth out MediaPipe jitter
+    gy = int(sm[1] * 0.55 + tip[1] * 0.45)
+    dist = math.hypot(gx - sm[0], gy - sm[1])
+    session._sm = (gx, gy)
+    if dist < GLIDE_MIN:
+        return
+    f = session.festival
+    color = f.palette[(session.tick // 3) % len(f.palette)]
+    width = max(3, int(4 + min(dist, 42) / 3))
+    session.ribbons.append([sm[0], sm[1], gx, gy, tuple(color), 0,
+                            int(34 + min(dist, 40) * 0.9), width])
+    if len(session.ribbons) > RIBBON_MAX:
+        del session.ribbons[:len(session.ribbons) - RIBBON_MAX]
+    if dist > 30:                               # fast strokes throw off sparkles
+        rng = np.random.default_rng(session.tick * 5 + int(dist))
+        for _ in range(3):
+            session._splash_append((gx + sm[0]) // 2 + int(rng.uniform(-18, 18)),
+                                   (gy + sm[1]) // 2 + int(rng.uniform(-18, 18)),
+                                   int(rng.uniform(-2, 2)), int(rng.uniform(1, 4)),
+                                   int(rng.uniform(18, 30)), color)
+
+
 def pinch_burst(session: Session, hand: HandState) -> None:
     d = hand.pinch[1]                    # thumb-index is the action gesture
     if not session.pinch_closed and d < ON and session.tick - session.last_burst > COOLDOWN:
@@ -200,6 +252,17 @@ def spawn_ambience(session: Session) -> None:
                                      int(rng.integers(0, int(session.height * 0.72)))))
     elif not f.stars and session.twinkles:
         session.twinkles.clear()
+    if f.embers and len(session.embers) < 46:
+        rng = np.random.default_rng(session.tick * 17 + len(session.embers))
+        while len(session.embers) < 46:
+            warm = ((20, 110, 255), (30, 60, 250), (40, 190, 255))[int(rng.integers(0, 3))]
+            session.embers.append([int(rng.integers(0, session.width)),
+                                   int(session.height + rng.integers(0, 120)),
+                                   int(rng.integers(2, 5)), int(rng.integers(10, 34)),
+                                   0, int(rng.uniform(80, 150)),
+                                   tuple(int(c) for c in warm)])
+    elif not f.embers and session.embers:
+        session.embers.clear()
 
 
 def _step_fx(session: Session) -> None:
@@ -212,6 +275,18 @@ def _step_fx(session: Session) -> None:
         if d[4] < d[5] and d[1] < session.height + 8:
             alive.append(d)
     session.drops = alive
+    for r in session.ribbons:
+        r[5] += 1                                  # ribbons hang, then melt away
+    while session.ribbons and session.ribbons[0][5] >= session.ribbons[0][6]:
+        session.ribbons.pop(0)
+    alive_e = []
+    for e in session.embers:
+        e[1] -= e[2]                               # sparks rise
+        e[0] += int(1.6 * math.sin((session.tick + e[3]) / e[3] * 3.1))
+        e[4] += 1
+        if e[4] < e[5] and e[1] > -20:
+            alive_e.append(e)
+    session.embers = alive_e
 
 
 def run_over_frame(frame_bgr: np.ndarray, session: Session,
@@ -222,12 +297,11 @@ def run_over_frame(frame_bgr: np.ndarray, session: Session,
     session.tick += 1
     spawn_ambience(session)
 
-    prev = session.trail[-1] if session.trail else None
     if hand is not None:
         session.trail.append((int(hand.x), int(hand.y)))
         if len(session.trail) > 22:
             del session.trail[:6]
-        _paint_trail(session, prev)
+        update_ribbon(session, hand)
         update_rain(session, hand)
         pinch_burst(session, hand)
     if face is not None:
@@ -237,6 +311,8 @@ def run_over_frame(frame_bgr: np.ndarray, session: Session,
     scene = frame_bgr
     _vignette_bottom(scene)
     art = session.art_for(session.festival)
+    if art["wash"] is not None:                    # the festival's own color mood
+        overlay(scene, art["wash"], 0, 0, WASH_ALPHA)
     if art["rangoli"] is not None:
         r = art["rangoli"]
         stamp_true(scene, r, int(session.width * 0.075), int(session.height * 0.86), 1.0, 0.9)
@@ -245,10 +321,14 @@ def run_over_frame(frame_bgr: np.ndarray, session: Session,
     if art["moon"] is not None:
         stamp_true(scene, art["moon"], session.width - int(session.width * 0.10),
                    int(session.height * 0.24), 1.0, 0.96)
+    if art["lights"] is not None:
+        overlay(scene, art["lights"], 0, 0, 0.95)
     if art["garland"] is not None:
         overlay(scene, art["garland"], 0, 0, 0.97)
 
+    _draw_ribbons(scene, session)
     _draw_twinkles(scene, session)
+    _draw_embers(scene, session)
     _draw_flakes(scene, session)
     _draw_drops(scene, session)
     _draw_paints(scene, session)
@@ -257,6 +337,31 @@ def run_over_frame(frame_bgr: np.ndarray, session: Session,
     _draw_banner(scene, session)
     _hud(scene, session)
     return scene
+
+
+def _draw_ribbons(scene: np.ndarray, session: Session) -> None:
+    import cv2
+
+    for x0, y0, x1, y1, color, age, life, width in session.ribbons:
+        fade = max(0.0, 1.0 - age / max(life, 1))
+        if fade <= 0:
+            continue
+        c = tuple(int(v * (0.35 + 0.65 * fade)) for v in color)
+        cv2.line(scene, (int(x0), int(y0)), (int(x1), int(y1)), c, width, cv2.LINE_AA)
+        cv2.line(scene, (int(x0), int(y1 - 2)), (int(x1), int(y1 - 2)),
+                 tuple(int(v * 0.8) for v in c), max(2, width // 3), cv2.LINE_AA)
+
+
+def _draw_embers(scene: np.ndarray, session: Session) -> None:
+    import cv2
+
+    for x, y, vy, sway, age, life, color in session.embers:
+        fade = max(0.0, 1.0 - age / max(life, 1))
+        flick = 0.75 + 0.25 * math.sin((session.tick + sway * 7) / 5.0)
+        c = tuple(int(v * fade * flick) for v in color)
+        cv2.circle(scene, (int(x), int(y)), int(2 + 2 * fade), c, -1, cv2.LINE_AA)
+        cv2.line(scene, (int(x), int(y - 7)), (int(x), int(y)),
+                 tuple(int(v * fade * 0.45) for v in color), 1, cv2.LINE_AA)
 
 
 def stamp_true(scene, art, cx, cy, scale, alpha):
@@ -321,24 +426,6 @@ def _draw_drops(scene: np.ndarray, session: Session) -> None:
 def _draw_paints(scene: np.ndarray, session: Session) -> None:
     for x, y, alpha, color in session.paints:
         stamp(scene, session.sprite(color), x, y, scale=1.0, alpha=alpha)
-
-
-def _paint_trail(session: Session, prev) -> None:
-    """Fingertip paani sprays down as you move (Holi-style ambience)."""
-    if prev is None or session.tick % 2:
-        return
-    f = session.festival
-    color = WATER if f.rain else f.burst_color
-    session._splash_append(hand_x(session), hand_y(session),
-                           0, 4, 18, color, rain=True)
-
-
-def hand_x(session: Session) -> int:
-    return session.trail[-1][0]
-
-
-def hand_y(session: Session) -> int:
-    return session.trail[-1][1]
 
 
 def _draw_cursor(scene: np.ndarray, session: Session, hand: HandState) -> None:

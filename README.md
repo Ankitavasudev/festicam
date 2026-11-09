@@ -21,14 +21,22 @@ python -m festicam
 Keys: `1-6` festivals · `c` clean the cheeks · `q` quit. That is the whole
 interface - zero effort, one gesture per effect.
 
-## The feel (v2)
+## The feel (v3)
 
+- **Glide your hand -> paint ribbons in the air.** The signature
+  interaction: sweep your fingertip across the frame and a thick vivid
+  ribbon of festival color follows it - you literally draw in the air.
+  Fast strokes throw sparkles; the paint hangs, then slowly melts away.
 - **The camera is the stage.** The webcam fills the screen (center-cropped
   to 16:9, upscaled to 1280x720 with an unsharp pass + warm color grade) -
   no side panel, no camera-in-a-box.
-- **Sticker-grade art, zero image assets.** The marigold garland, rangoli
-  mandalas, cheek-paint splashes and the Eid crescent are drawn in code
-  (layered petals, soft shadows, painterly speckles, a bloom pass) and
+- **Every festival has its own identity** - a distinct color wash grading
+  the whole scene plus its own art: Holi's marigold garland + rangoli,
+  Diwali's glowing fairy-light string + rising embers, Eid's true crescent,
+  Christmas snow, New Year neon confetti.
+- **Sticker-grade art, zero image assets.** Everything - garlands, light
+  strings, rangolis, cheek-paint splashes, the crescent - is drawn in code
+  (layered petals, halos, painterly speckles, a bloom pass) and
   *prerendered once* at startup - a frame pays only alpha blends.
 - **Silent by design.** No sound layer at all; the vibe is pure picture.
 - **Head tilting works like a mirror.** Head tilts left -> the cheek on

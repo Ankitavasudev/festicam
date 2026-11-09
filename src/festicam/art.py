@@ -167,6 +167,49 @@ def make_splash(radius: int, color, alpha: float = 0.85) -> np.ndarray:
     return _bloomy(canvas, 0.7)
 
 
+def make_lights(width: int, palette, sag: float = 0.16) -> np.ndarray:
+    """Fairy-light string: glowing bulbs on a drooping wire."""
+    import cv2
+
+    h = int(width * sag) + 90
+    canvas = blank(width, h)
+    n = max(9, width // 150)
+    pts = []
+    for i in range(n + 1):
+        t = i / n
+        x = int(16 + (width - 32) * t)
+        y = 18 + int(math.sin(t * math.pi) * h * sag * 0.9)
+        pts.append((x, y))
+    cv2.polylines(canvas, [np.array(pts)], False, (60, 55, 55, 230), 2, cv2.LINE_AA)
+    rng = np.random.default_rng(21)
+    for i, (x, y) in enumerate(pts[1:-1]):
+        color = tuple(int(c) for c in palette[i % len(palette)])
+        stem_y = y + 10
+        cv2.line(canvas, (x, y), (x, stem_y), (60, 55, 55, 230), 2, cv2.LINE_AA)
+        # halo -> body -> hot core
+        cv2.circle(canvas, (x, stem_y + 8), 17, color + (42,), -1, cv2.LINE_AA)
+        cv2.circle(canvas, (x, stem_y + 8), 9, color + (150,), -1, cv2.LINE_AA)
+        cv2.circle(canvas, (x, stem_y + 8), 5, (255, 255, 255, 235), -1, cv2.LINE_AA)
+        if rng.uniform() < 0.3:                     # an occasional star topper on a bulb
+            for da in range(4):
+                a = math.pi / 2 * da + math.pi / 4
+                cv2.line(canvas, (x + int(14 * math.cos(a)), stem_y + 8 + int(14 * math.sin(a))),
+                         (x + int(22 * math.cos(a)), stem_y + 8 + int(22 * math.sin(a))),
+                         color + (200,), 2, cv2.LINE_AA)
+    return _bloomy(canvas, 0.8)
+
+
+def make_wash(w: int, h: int, top, bottom, alpha: int = 58) -> np.ndarray:
+    """Per-festival mood: a vertical color wash over the camera scene."""
+    yy = np.linspace(0, 1, h, dtype=np.float32)[:, None, None]  # (h, 1, 1)
+    ramp = np.zeros((h, w, 4), dtype=np.uint8)
+    yy_w = np.broadcast_to(yy, (h, w, 1))
+    for ch in range(3):
+        ramp[:, :, ch] = (top[ch] * (1 - yy_w[:, :, 0]) + bottom[ch] * yy_w[:, :, 0]).astype(np.uint8)
+    ramp[:, :, 3] = alpha
+    return ramp
+
+
 def make_moon(radius: int, color) -> np.ndarray:
     """True crescent: bright disc minus an offset disc, prerendered with glow."""
     import cv2

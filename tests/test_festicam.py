@@ -331,3 +331,107 @@ def test_hand_state_has_wrist():
 def test_tracker_lazy_load():
     t = HandTracker()
     assert t._mode is None
+
+
+# --- new in v3: glide ribbons + per-festival identity --------------------------------
+
+from festicam.app import GLIDE_MIN
+
+
+def moving_hand_seq(session, steps):
+    """Yield (frame, HandState) sweeping the fingertip across the frame."""
+    frame = np.zeros((session.height, session.width, 3), dtype=np.uint8)
+    out = []
+    for i in range(steps):
+        x = 120 + i * 45
+        tips = [[x, 200], [x + 6, 190], [x + 8, 200], [x + 4, 210], [x + 9, 195]]
+        out.append((frame.copy(),
+                    HandState(tips=[[t[0] * (1 if j else 0) + x * (1 - (1 if j else 0)),
+                                     t[1]] for j, t in enumerate(tips)],
+                              wrist=(x - 10, 320), pinch=[0.9, 0.9, 0.9, 0.9],
+                              x=x, y=200)))
+    return out
+
+
+def test_glide_paints_ribbons():
+    s = make_session()
+    for frame, hs in moving_hand_seq(s, 8):
+        run_over_frame(frame, s, hs)
+    assert len(s.ribbons) >= 5, "fast hand glide must paint air ribbons"
+
+
+def test_still_hand_no_ribbons():
+    s = make_session()
+    frame = np.zeros((s.height, s.width, 3), dtype=np.uint8)
+    hs = hand_state(wrist_y=500)
+    for _ in range(6):
+        run_over_frame(frame.copy(), s, hs)
+    assert s.ribbons == []
+
+
+def test_ribbon_segment_shape():
+    s = make_session()
+    for frame, hs in moving_hand_seq(s, 5):
+        run_over_frame(frame, s, hs)
+    r = s.ribbons[-1]
+    assert len(r) == 8 and r[7] >= 3
+
+
+def test_ribbons_age_out():
+    import festicam.app as app
+    s = make_session()
+    for frame, hs in moving_hand_seq(s, 6):
+        run_over_frame(frame, s, hs)
+    before = len(s.ribbons)
+    for _ in range(90):
+        s.tick += 1
+        app._step_fx(s)
+    assert len(s.ribbons) < before
+
+
+def test_switch_clears_ribbons_and_drops_welcome_burst():
+    s = make_session()
+    for frame, hs in moving_hand_seq(s, 6):
+        run_over_frame(frame, s, hs)
+    s.switch(2)
+    assert s.ribbons == []
+    assert any(not d[7] for d in s.drops)      # welcome burst beads, not rain
+
+
+def test_every_festival_has_a_wash():
+    for f in FESTIVALS:
+        top, bottom = f.wash
+        assert len(top) == 3 and len(bottom) == 3 and top != bottom
+
+
+def test_wash_layer_changes_camera_pixels():
+    s = make_session()
+    frame = np.full((s.height, s.width, 3), 115, dtype=np.uint8)
+    out = run_over_frame(frame.copy(), s, None)
+    assert int(out[10, 500].mean()) != 115, "festival wash must tint the scene"
+
+
+def test_lights_config_differs_per_festival():
+    s = make_session()
+    s.switch(1)
+    assert s.art_for(s.festival)["lights"] is not None      # diwali
+    s.switch(0)
+    assert s.art_for(s.festival)["lights"] is None          # holi keeps flowers
+
+
+def test_embers_rise_in_diwali_only():
+    s = make_session()
+    s.switch(1)
+    frame = np.zeros((s.height, s.width, 3), dtype=np.uint8)
+    run_over_frame(frame.copy(), s, None)
+    assert len(s.embers) >= 40
+    s.switch(0)
+    run_over_frame(frame.copy(), s, None)
+    assert s.embers == []
+
+
+def test_wash_scales_and_blends():
+    from festicam.art import make_wash
+
+    w = make_wash(64, 48, (200, 60, 220), (60, 180, 90))
+    assert w.shape == (48, 64, 4) and int(w[:, :, 3].mean()) > 0

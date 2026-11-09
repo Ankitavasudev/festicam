@@ -28,10 +28,13 @@ class Festival:
     title: str
     hint: str                     # one easy line: what to do
     palette: list[int]            # bgr colors for cheek paint + bursts
+    wash: tuple                   # (top, bottom) bgr scene tint -> each festival's mood
     garland: bool = False         # marigold art across the top
+    lights: bool = False          # glowing fairy-light string across the top
     rangoli: bool = False         # mandala art in the corners
     moon: bool = False            # glowing crescent
     stars: bool = False           # twinkling sparkles
+    embers: bool = False          # warm sparks rising from below
     snow: bool = False            # snowfall ambience
     confetti: bool = False        # falling confetti ambience
     rain: bool = False            # hand raised -> paani falls
@@ -42,8 +45,9 @@ class Festival:
 HOLI = Festival(
     key="1",
     title="HAPPY HOLI!",
-    hint="tilt your head to paint your cheeks   |   raise a hand for paani   |   pinch for a burst",
+    hint="glide your hand to paint ribbons   |   tilt head for gulaal   |   pinch for a burst",
     palette=[PINK, MAGENTA, SUNSET, GREEN, CYAN, VIOLET],
+    wash=((170, 70, 210), (60, 180, 90)),
     garland=True,
     rangoli=True,
     rain=True,
@@ -54,20 +58,22 @@ HOLI = Festival(
 DIWALI = Festival(
     key="2",
     title="HAPPY DIWALI!",
-    hint="tilt to light up your cheeks with gold   |   pinch to launch fireworks",
+    hint="glide golden ribbons in the air   |   pinch to launch fireworks",
     palette=[GOLD, SUNSET, PINK, CYAN],
-    garland=True,
+    wash=((30, 100, 245), (10, 40, 160)),
+    lights=True,
     rangoli=True,
     stars=True,
-    cheek_paint=True,
+    embers=True,
     burst_color=GOLD,
 )
 
 RAKHI = Festival(
     key="3",
     title="HAPPY RAKSHA BANDHAN!",
-    hint="raise your hand to catch the blessings   |   pinch for a sparkle",
+    hint="wave your hand - rosy ribbons follow it   |   pinch for a sparkle",
     palette=[GOLD, PINK, SUNSET],
+    wash=((150, 90, 225), (90, 130, 255)),
     garland=True,
     stars=True,
     burst_color=GOLD,
@@ -76,10 +82,11 @@ RAKHI = Festival(
 EID = Festival(
     key="4",
     title="EID MUBARAK!",
-    hint="look up - the crescent is yours tonight   |   pinch for sparkles",
+    hint="glide silver-green ribbons   |   look up - the crescent is yours",
     palette=[GOLD, GREEN, CYAN],
-    garland=True,
+    wash=((255, 205, 80), (255, 160, 50)),
     moon=True,
+    lights=True,
     stars=True,
     burst_color=GREEN,
 )
@@ -87,8 +94,9 @@ EID = Festival(
 CHRISTMAS = Festival(
     key="5",
     title="MERRY CHRISTMAS!",
-    hint="let it snow   |   tilt for a rosy cheeks glow   |   pinch for a twinkle",
-    palette=[GOLD, CYAN, SUNSET, WHITEISH],
+    hint="let it snow   |   glide icy ribbons   |   tilt for a rosy glow",
+    palette=[CYAN, (40, 40, 200), WHITEISH, GOLD],
+    wash=((250, 130, 70), (0, 30, 80)),
     garland=True,
     snow=True,
     cheek_paint=True,
@@ -98,12 +106,12 @@ CHRISTMAS = Festival(
 NEW_YEAR = Festival(
     key="6",
     title="HAPPY NEW YEAR!",
-    hint="pinch the sky to ring in midnight   |   raise a hand for confetti",
+    hint="glide neon ribbons   |   pinch the sky to ring in midnight",
     palette=[GOLD, MAGENTA, PINK, CYAN, GREEN],
-    garland=True,
+    wash=((200, 40, 170), (0, 15, 50)),
     confetti=True,
+    lights=True,
     stars=True,
-    rain=True,
     burst_color=GOLD,
 )
 

@@ -26,9 +26,10 @@ GARLAND = (60, 170, 240)        # marigold orange
 class Festival:
     key: str                      # hotkey 1..6
     title: str
-    hint: str                     # one easy line: what to do
     palette: list[int]            # bgr colors for cheek paint + bursts
     wash: tuple                   # (top, bottom) bgr scene tint -> each festival's mood
+    welcome: tuple = ()           # ("are you far away?", "comfort line") shown first
+    hint: str = ""                # one easy line: what to do
     garland: bool = False         # marigold art across the top
     lights: bool = False          # glowing fairy-light string across the top
     rangoli: bool = False         # mandala art in the corners
@@ -45,6 +46,8 @@ class Festival:
 HOLI = Festival(
     key="1",
     title="HAPPY HOLI!",
+    welcome=("Missing your family this Holi?",
+             "You are not far tonight - the colors came to you."),
     hint="glide your hand to paint ribbons   |   tilt head for gulaal   |   pinch for a burst",
     palette=[PINK, MAGENTA, SUNSET, GREEN, CYAN, VIOLET],
     wash=((170, 70, 210), (60, 180, 90)),
@@ -58,6 +61,8 @@ HOLI = Festival(
 DIWALI = Festival(
     key="2",
     title="HAPPY DIWALI!",
+    welcome=("Far from home this Diwali?",
+             "Tonight the diyas glow right where you are."),
     hint="glide golden ribbons in the air   |   pinch to launch fireworks",
     palette=[GOLD, SUNSET, PINK, CYAN],
     wash=((30, 100, 245), (10, 40, 160)),
@@ -71,6 +76,8 @@ DIWALI = Festival(
 RAKHI = Festival(
     key="3",
     title="HAPPY RAKSHA BANDHAN!",
+    welcome=("Can't tie the rakhi in person this year?",
+             "Your love still travels - straight onto this screen."),
     hint="wave your hand - rosy ribbons follow it   |   pinch for a sparkle",
     palette=[GOLD, PINK, SUNSET],
     wash=((150, 90, 225), (90, 130, 255)),
@@ -82,6 +89,8 @@ RAKHI = Festival(
 EID = Festival(
     key="4",
     title="EID MUBARAK!",
+    welcome=("Away from family this Eid?",
+             "Look up - the crescent rises for you too."),
     hint="glide silver-green ribbons   |   look up - the crescent is yours",
     palette=[GOLD, GREEN, CYAN],
     wash=((255, 205, 80), (255, 160, 50)),
@@ -94,6 +103,8 @@ EID = Festival(
 CHRISTMAS = Festival(
     key="5",
     title="MERRY CHRISTMAS!",
+    welcome=("Feeling far away this Christmas?",
+             "The snow is falling just for you - you are not alone."),
     hint="let it snow   |   glide icy ribbons   |   tilt for a rosy glow",
     palette=[CYAN, (40, 40, 200), WHITEISH, GOLD],
     wash=((250, 130, 70), (0, 30, 80)),
@@ -106,6 +117,8 @@ CHRISTMAS = Festival(
 NEW_YEAR = Festival(
     key="6",
     title="HAPPY NEW YEAR!",
+    welcome=("Counting down alone tonight?",
+             "The whole sky celebrates with you now."),
     hint="glide neon ribbons   |   pinch the sky to ring in midnight",
     palette=[GOLD, MAGENTA, PINK, CYAN, GREEN],
     wash=((200, 40, 170), (0, 15, 50)),

@@ -33,6 +33,7 @@ CHEEK_STAMPS_MAX = 26
 GLIDE_MIN = 9.0         # fingertip speed (px/frame) that starts a ribbon
 RIBBON_MAX = 220        # ribbon segments kept on screen
 WASH_ALPHA = 0.5
+WELCOME_FRAMES = 118    # ~4 s emotional intro before the play hints
 
 
 class Session:
@@ -55,6 +56,7 @@ class Session:
         self.pinch_closed = False
         self.last_burst = -99
         self.tilt_armed = True            # face must come back level before next dab
+        self.welcome_until = WELCOME_FRAMES
         self._sprites: dict[int, np.ndarray] = {}
         self._art_cache: dict[int, dict] = {}
 
@@ -75,6 +77,7 @@ class Session:
         self.embers.clear()
         self._sm = None
         self.tilt_armed = True
+        self.welcome_until = self.tick + WELCOME_FRAMES
         # welcome burst: the new festival paints its own arrival
         f = self.festival
         for i in range(3):
@@ -152,11 +155,23 @@ def stage_frame(raw: np.ndarray, session: Session) -> np.ndarray:
         y0 = max(0, (h - ch) // 2)
         crop = raw[y0:y0 + ch]
     out = cv2.resize(crop, (session.width, session.height), interpolation=cv2.INTER_CUBIC)
-    # premium finish: unsharp mask + gentle warm grade (looks like real FHD)
-    blur = cv2.GaussianBlur(out, (0, 0), 2.2)
-    out = cv2.addWeighted(out, 1.32, blur, -0.32, 0)
-    out = cv2.convertScaleAbs(out, alpha=1.06, beta=3)
-    out[:, :, 2] = np.clip(out[:, :, 2].astype(np.int16) + 6, 0, 255).astype(np.uint8)
+    # --- the "iPhone-look" finish ------------------------------------------
+    # 1) auto-lighting: CLAHE on the L channel fixes backlit rooms, lifts
+    #    shadowed faces without blowing out windows
+    lab = cv2.cvtColor(out, cv2.COLOR_BGR2Lab)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=1.7, tileGridSize=(8, 8))
+    l_ch = clahe.apply(l_ch)
+    out = cv2.cvtColor(cv2.merge((l_ch, a_ch, b_ch)), cv2.COLOR_Lab2BGR)
+    # 2) warm skin-tone curve + gentle contrast
+    out = cv2.convertScaleAbs(out, alpha=1.04, beta=2)
+    out[:, :, 2] = np.clip(out[:, :, 2].astype(np.int16) * 1.03 + 5, 0, 255).astype(np.uint8)
+    hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1].astype(np.int16) + 12, 0, 255).astype(np.uint8)
+    out = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    # 3) unsharp crispness
+    blur = cv2.GaussianBlur(out, (0, 0), 1.9)
+    out = cv2.addWeighted(out, 1.28, blur, -0.28, 0)
     return out
 
 
@@ -335,8 +350,48 @@ def run_over_frame(frame_bgr: np.ndarray, session: Session,
     if hand is not None:
         _draw_cursor(scene, session, hand)
     _draw_banner(scene, session)
+    if welcome_active(session):
+        _draw_welcome(scene, session)
     _hud(scene, session)
     return scene
+
+
+def _halo_text(scene, text, xy, scale, color, thick, halo=(10, 10, 14)):
+    """Outlined text that cannot drift: same thickness, halo via 4 offsets.
+
+    cv2.putText widens glyph advances as thickness grows, so layering a
+    thick dark copy under a thin white one drifts apart at the tail.
+    Drawing the SAME text at +/-1 px offsets keeps perfect alignment.
+    """
+    import cv2
+
+    x, y = xy
+    for dx, dy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+        cv2.putText(scene, text, (x + dx, y + dy), cv2.FONT_HERSHEY_SIMPLEX,
+                    scale, halo, thick, cv2.LINE_AA)
+    cv2.putText(scene, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
+
+
+def welcome_active(session: Session) -> bool:
+    return session.tick < session.welcome_until
+
+
+def _draw_welcome(scene: np.ndarray, session: Session) -> None:
+    """The soft emotional intro: 'you are far away, and it is okay.'"""
+    import cv2
+
+    f = session.festival
+    fade = max(0.0, min(1.0, (session.welcome_until - session.tick) / 40.0))
+    cx = session.width // 2
+    cy = int(session.height * 0.58)
+    l1, l2 = f.welcome
+    warm = (235, 244, 250)                     # soft warm white in bgr
+    for text, dy, scale, thick in ((l1, -6, 0.86, 2), (l2, 56, 0.66, 1)):
+        (tw2, th2), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+        tx = cx - tw2 // 2
+        ty = cy + dy
+        cols = tuple(int(c * fade + v * (1 - fade)) for c, v in zip(warm, (120, 130, 140)))
+        _halo_text(scene, text, (tx, ty), scale, cols, thick)
 
 
 def _draw_ribbons(scene: np.ndarray, session: Session) -> None:
@@ -455,12 +510,12 @@ def _draw_banner(scene: np.ndarray, session: Session) -> None:
     x = (session.width - tw) // 2
     shimmy = int(2 * math.sin(session.tick / 30))
     soft = tuple(int(c * 0.4) for c in f.burst_color)
-    cv2.putText(scene, f.title, (x + 2, y + 2), cv2.FONT_HERSHEY_COMPLEX, scale, (18, 18, 26), 4, cv2.LINE_AA)
-    cv2.putText(scene, f.title, (x, y + shimmy), cv2.FONT_HERSHEY_COMPLEX, scale, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(scene, f.title, (x, y + shimmy), cv2.FONT_HERSHEY_COMPLEX, scale, soft, 1, cv2.LINE_AA)
-    (tw2, _), _ = cv2.getTextSize(f.hint, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 1)
-    cv2.putText(scene, f.hint, ((session.width - tw2) // 2, y + 34),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.56, (238, 238, 238), 1, cv2.LINE_AA)
+    _halo_text(scene, f.title, (x, y + shimmy), scale, (255, 255, 255), 2, halo=(18, 18, 26))
+    cv2.putText(scene, f.title, (x, y + shimmy), cv2.FONT_HERSHEY_COMPLEX, scale, soft, 2, cv2.LINE_AA)
+    if not welcome_active(session):            # hints come after the comfort intro
+        (tw2, _), _ = cv2.getTextSize(f.hint, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 1)
+        hx = (session.width - tw2) // 2
+        _halo_text(scene, f.hint, (hx, y + 34), 0.56, (240, 240, 240), 1)
 
 
 def _hud(scene: np.ndarray, session: Session) -> None:
@@ -505,8 +560,20 @@ def main(argv: list[str] | None = None) -> int:
     if not cam.isOpened():
         print("could not open camera %d" % args.camera)
         return 2
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # ask for the best mode first; the driver answers with what it really has
+    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    ok, raw = cam.read()
+    if not ok:                                  # some sensors only open at 480x640
+        cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        ok, raw = cam.read()
+        if not ok:
+            print("camera opened but no frames arrived")
+            return 2
+    print("camera mode:", int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)), "x",
+          int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+          "- staged to 1280x720 with CLahe + warm skin grade")
 
     win = "FestiCam - festival in your camera"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)

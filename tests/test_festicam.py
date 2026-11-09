@@ -435,3 +435,53 @@ def test_wash_scales_and_blends():
 
     w = make_wash(64, 48, (200, 60, 220), (60, 180, 90))
     assert w.shape == (48, 64, 4) and int(w[:, :, 3].mean()) > 0
+
+
+# --- v4: emotional welcome + camera finish -------------------------------------------
+
+def test_every_festival_has_emotional_welcome():
+    for f in FESTIVALS:
+        assert len(f.welcome) == 2 and all(isinstance(x, str) for x in f.welcome)
+        assert any("not" in f.welcome[1] or "you" in f.welcome[1].lower() for _ in [0])
+
+
+def test_welcome_first_hints_after():
+    import festicam.app as app
+
+    s = make_session()
+    assert app.welcome_active(s)               # intro comes first
+    assert s.welcome_until == app.WELCOME_FRAMES
+    s.tick = app.WELCOME_FRAMES + 5
+    assert not app.welcome_active(s)
+
+
+def test_welcome_rearms_on_festival_switch():
+    import festicam.app as app
+
+    s = make_session()
+    s.tick = 400
+    s.switch(1)
+    assert app.welcome_active(s)               # every festival welcomes again
+
+
+def test_camera_finish_lights_a_backlit_face():
+    import cv2
+
+    s = make_session()
+    raw = np.zeros((480, 640, 3), dtype=np.uint8)
+    raw[:150] = 210                             # bright window behind
+    raw[150:] = 40                              # dark room / face
+    out = stage_frame(raw, s)
+    plain = cv2.resize(raw, (s.width, s.height), interpolation=cv2.INTER_CUBIC)
+    face_out = out[int(s.height * 0.55):, :].mean()
+    face_plain = plain[int(s.height * 0.55):, :].mean()
+    assert face_out > face_plain, "CLAHE finish must lift shadowed faces"
+
+
+def test_camera_finish_saturated_warm():
+    s = make_session()
+    raw = np.zeros((480, 640, 3), dtype=np.uint8)
+    raw[:] = (90, 90, 90)
+    raw[:, :, 2] = 180                          # reddish scene
+    out = stage_frame(raw, s)
+    assert int(out[:, :, 2].mean()) > int(out[:, :, 1].mean())  # warm curve keeps red on top
